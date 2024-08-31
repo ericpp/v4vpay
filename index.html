@@ -1,0 +1,304 @@
+<html>
+<head>
+<title>Boost</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<style>
+html {
+	font-size: 125%;
+	font-family: Helvetica, sans-serif;
+}
+
+body {
+	background-color: #003;
+	color: white;
+}
+
+select, input, button, textarea, table {
+	font-size: 100%;
+	font-family: Helvetica, sans-serif;
+}
+
+input:invalid {
+	border: 2px dashed red;
+}
+
+input:valid {
+	border: 2px solid black;
+}
+
+blocktext {
+	font-size: 75%;
+	word-wrap: break-word;
+	background-color: #aaa;
+	display: block;
+	background-color: #002;
+}
+
+#dialog {
+	width: 100%;
+	text-align: center
+}
+
+@media (min-width: 768px) {
+	#dialog {
+		max-width: 30rem;
+		margin-left: auto;
+		margin-right: auto;
+	}
+}
+
+#boostform select,
+#boostform input,
+#boostform textarea,
+#boostform button {
+	padding: 0.25rem 0.5rem;
+	width: 100%;
+}
+</style>
+
+<script src="qrcode.min.js"></script>
+
+<script>
+
+function App() {
+	this.event = {}
+	this.items = {}
+
+	this.selectedItem = {}
+
+	this.start = () => {
+		this.loadEvents()
+
+		document.getElementById("boost").addEventListener("click", () => this.generateInvoice())
+		document.getElementById("sats").addEventListener("keyup", () => this.renderSplits())
+		document.getElementById("event").addEventListener("change", () => this.renderSplits())
+	}
+
+	this.loadEvents = async () => {
+		const result = await fetch(`/splits.json`)
+		this.event = await result.json()
+
+		document.getElementById("title").innerText = this.event.title
+
+		// this.items[splits.guid] = {
+		// 	title: splits.title,
+		// 	guid: splits.guid,
+		// 	value: { valueRecipient: splits.recipients },
+		// }
+
+		this.event.live_items.forEach(item => {
+			this.items[item.guid] = item
+		})
+
+		this.renderEvents()
+	}
+
+	this.renderEvents = () => {
+		const event = document.getElementById("event")
+		event.innerHTML = '<option>Select a session...</option>'
+
+		for (var guid in this.items) {
+			const opt = document.createElement("option")
+			opt.value = guid
+			opt.text = this.items[guid].title
+			event.appendChild(opt)
+		}
+	}
+
+	this.renderSplits = () => {
+		const session = this.getSelectedSession()
+		const splits = this.getSplits(this.selectedItem.value.valueRecipient)
+		const tbl = document.getElementById("splittable")
+
+		if (splits.length === 0) {
+			document.getElementById("splitform").style.display = 'none'
+		}
+		else {
+			document.getElementById("splitform").style.display = ''
+		}
+
+		tbl.innerHTML = '';
+
+		for (var split of splits) {
+			const tr = document.createElement("tr")
+
+			const name = document.createElement("td")
+			name.innerText = split[1]
+
+			const sats = document.createElement("td")
+			sats.innerText = `${split[0]} sats`
+
+			tr.appendChild(name)
+			tr.appendChild(sats)
+
+			tbl.appendChild(tr)
+		}
+
+	}
+
+	this.getSelectedSession = () => {
+		const event = document.getElementById("event")
+		const option = event.options[event.selectedIndex]
+
+		this.selectedItem = this.items[option.value]
+		return this.selectedItem
+	}
+
+	this.getSplits = (recipients) => {
+		const sats = this.getSats()
+
+		const totalShares = recipients.reduce((result, item) => {
+			return result + item.split
+		}, 0)
+
+		return recipients.map(item => {
+			const satSplit = Math.floor((item.split / totalShares) * sats)
+			const recipient = [satSplit, item.name, item.address]
+			if (item.customKey) {
+				recipient.push(item.customKey, item.customValue)
+			}
+			return recipient
+		})
+	}
+
+	this.getSats = () => parseInt(document.getElementById("sats").value || 0)
+
+	this.showQrCode = (payment_request) => {
+		document.getElementById("boostform").style.display = 'none'
+		document.getElementById("invoiceform").style.display = ''
+
+		document.getElementById("qrcode_text").innerText = payment_request
+		document.getElementById("qrcode_link").href = `lightning:${payment_request}`
+
+		new QRCode(document.getElementById("qrcode"), payment_request)
+	}
+
+	this.generateInvoice = async () => {
+		const event = document.getElementById("event")
+		const option = event.options[event.selectedIndex]
+
+		this.selectedItem = this.items[option.value]
+
+		let valid = document.getElementById("boostform").checkValidity()
+		console.log(valid)
+
+		const selectedRecipients = this.selectedItem.value.valueRecipient
+
+		const totalShares = selectedRecipients.reduce((result, item) => {
+			return result + item.split
+		}, 0)
+
+		const invoice = {
+			"payer_name": document.getElementById("name").value,
+			"description": document.getElementById("message").value,
+			"num_sats": this.getSats(),
+			"metadata": {
+				"forwarding_data": {
+					"payment_info": {},
+					"recipients": [],
+				},
+			},
+		}
+
+		invoice.metadata.forwarding_data.payment_info = {
+			"action": "boost",
+			"app_name": "V4V Boost Split",
+			"episode": this.selectedItem.title,
+			"episode_guid": this.selectedItem.guid,
+			"guid": this.event.guid,
+			"podcast": this.event.title,
+			"sender_name": invoice.payer_name,
+			"message": invoice.description,
+			"timestamp": 0,
+			"total_num_sats": invoice.num_sats,
+		}
+
+		invoice.metadata.forwarding_data.recipients = selectedRecipients.map(recipient => {
+			const address = { "pubkey": recipient.address }
+
+			if (recipient.customKey) {
+				address.custom_data = {}
+				address.custom_data[recipient.customKey] = recipient.customValue
+			}
+
+			return {
+				"address": address,
+				"num_sats": Math.round(invoice.num_sats * recipient.split / totalShares),
+				"name": recipient.name,
+			}
+		})
+
+		document.getElementById("boost").innerText = "Loading"
+
+		const headers = new Headers()
+		headers.append("Content-Type", "application/json")
+
+		const result = await fetch(`/api/invoice`, {
+			method: "POST",
+			headers: headers,
+			body: JSON.stringify(invoice),
+		})
+
+		const response = await result.json()
+
+		this.showQrCode(response.payment_request)
+	}
+}
+
+window.addEventListener("load", async () => {
+	const app = new App()
+	app.start()
+})
+
+</script>
+</head>
+
+<body>
+
+	<div id="dialog">
+		<h1 id="title"></h1>
+		<h2 style="color: orange;">Support with Bitcoin Lightning</h2>
+
+		<form id="boostform" style="text-align: left">
+			<p>
+				Session <select id="event" name="event" required><option>Loading...</option></select>
+			</p>
+			<p>
+				Your Name <input type="text" id="name" name="name" required>
+			</p>
+			<p>
+				<span style="vertical-align: top">Your Message:</span>
+				<textarea id="message" name="message" style="height: 5rem;"></textarea>
+			</p>
+			<p>
+				Amount in sats <input type="number" id="sats" name="sats" size="4" required>
+			</p>
+
+			<button id="boost" type="button">
+				Proceed to payment
+			</button>
+		</form>
+
+		<div id="invoiceform" style="display: none">
+			<center>
+				<div>Tap/scan the QR code or copy the invoice text into your Bitcoin Lightning wallet:</div>
+				<a id="qrcode_link" href="">
+					<div id="qrcode" style="margin-top: 1rem;"></div>
+				</a>
+				<blocktext id="qrcode_text" style="margin-top: 1rem;"></blocktext>
+			</center>
+		</div>
+
+		<div id="splitform" style="display: none">
+			<h3>Splits</h3>
+			<table id="splittable" style="margin-left: auto; margin-right: auto">
+			</table>
+		</div>
+
+	</div>
+
+
+</body>
+</html>
